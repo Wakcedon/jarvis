@@ -1,0 +1,99 @@
+audio:
+  sample_rate: 16000
+  input_device: null
+  output_device: null
+  activation_feedback: "tts"   # tts|beep|none
+  activation_text: "Слушаю."
+  activation_delay_s: 0.02
+
+recording:
+  max_s: 5.0
+  start_threshold: 0.015
+  auto_threshold: true
+  noise_calibrate_s: 0.4
+  threshold_multiplier: 3.5
+  start_immediately_after_wakeword: true
+  pre_roll_s: 0.25
+  auto_gain: true
+  target_rms: 0.03
+  max_gain: 25.0
+  end_silence_s: 0.45
+  chunk_ms: 20
+
+wake_word:
+  enabled: true
+  phrases:
+    - "джарвис"
+    - "ассистент"
+  vosk_model_path: "models/vosk-model-small-ru-0.22"
+  blocksize: 1600
+  min_rms: 0.010
+
+stt:
+  backend: "faster-whisper"
+  model_size: "base"          # tiny/base/small/medium/large-v3 (чем больше — тем тяжелее)
+  model_path: "models/whisper/faster-whisper-base"  # если папки нет, запустите scripts/download_models.sh
+  device: "cpu"               # cpu/cuda
+  compute_type: "int8"        # cpu: int8|int8_float32|float32; cuda: float16|int8_float16
+  cpu_threads: 4
+  num_workers: 1
+  language: "ru"
+  beam_size: 2
+  vad_filter: true
+  initial_prompt: "Разговор на русском языке."
+  min_avg_logprob: -1.2
+  max_no_speech_prob: 0.6
+
+ui:
+  mic_level_threshold: 0.02
+  status_path: "runtime/status.json"
+
+tts:
+  backend: "piper"
+  model_path: "models/piper/ru_RU-dmitri-medium.onnx"
+  config_path: "models/piper/ru_RU-dmitri-medium.onnx.json"
+  speaker: null
+  length_scale: 0.88
+  sentence_silence: 0.15
+  volume: 0.6
+
+llm:
+  enabled: true
+  backend: "ollama"            # ollama|llamacpp
+  base_url: "http://localhost:11434"
+  model: "qwen2.5:1.5b-instruct"  # quality_model (совместимость)
+  dual_model_enabled: true
+  fast_model: "qwen2.5:0.5b-instruct"
+  quality_model: "qwen2.5:1.5b-instruct"
+  timeout_s: 75
+  disable_if_unreachable: true
+  autostart: true
+  auto_pull_model: false
+  num_predict: 64
+  temperature: 0.2
+  history_max_messages: 8
+  llamacpp_base_url: "http://localhost:8080"  # если backend=llamacpp
+  ollama_num_ctx: 1024
+  ollama_num_thread: 4
+  ollama_keep_alive: "30m"
+  fast_mode: true
+  fast_max_sentences: 1
+  fast_max_chars: 260
+  warmup_on_start: true
+
+commands:
+  notes_path: "data/notes.md"
+  memory_path: "data/memory.json"
+  weather_cache_path: "data/weather_cache.json"
+  reminders_path: "data/reminders.json"
+  todo_path: "data/todo.json"
+  screenshots_dir: "data/screenshots"
+  default_browser_url: "https://www.google.com"
+  default_city: "Новокузнецк"
+  allowed_apps:
+    - "firefox"
+    - "google-chrome"
+    - "chromium"
+    - "code"
+  allow_shell: false
+  allow_desktop_launch: true

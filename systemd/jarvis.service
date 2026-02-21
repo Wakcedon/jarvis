@@ -1,0 +1,23 @@
+[Unit]
+Description=Jarvis local voice assistant
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ВАЖНО: из-за пробелов/кириллицы в пути лучше отредактировать на ваш реальный абсолютный путь.
+# Пример:
+# WorkingDirectory=/home/user/Projects/jarvis
+# ExecStart=/home/user/Projects/jarvis/.venv/bin/python -m jarvis --config /home/user/Projects/jarvis/config.yaml
+
+WorkingDirectory=/CHANGE/ME
+ExecStart=/CHANGE/ME/.venv/bin/python -m jarvis --config /CHANGE/ME/config.yaml
+
+Restart=on-failure
+RestartSec=2
+
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

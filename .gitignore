@@ -1,0 +1,53 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Runtime state
+runtime/
+
+# Downloaded / generated models (use scripts/download_models.sh)
+models/
+
+# User data (notes, reminders, caches, screenshots)
+data/*.json
+data/*_cache.*
+data/notes.md
+data/screenshots/
+data/**/*.wav
+data/**/*.mp3
+
+# Logs
+*.log

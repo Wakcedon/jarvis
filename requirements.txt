@@ -1,0 +1,10 @@
+vosk>=0.3.45
+sounddevice>=0.4.6
+numpy>=1.26
+PyYAML>=6.0
+requests>=2.31
+faster-whisper>=1.2.1
+piper-tts>=1.4.1
+soundfile>=0.12
+pathvalidate>=3.2.0
+num2words>=0.5.13

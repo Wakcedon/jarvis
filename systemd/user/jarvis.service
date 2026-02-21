@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis voice assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/opt/jarvis
+ExecStart=%h/.local/opt/jarvis/.venv/bin/python -m jarvis --config %h/.local/opt/jarvis/config.yaml
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=%h/.local/opt/jarvis/models/hf
+
+[Install]
+WantedBy=default.target
