@@ -2,7 +2,7 @@
 Type=Application
 Name=Jarvis (Tray)
 Comment=Локальный голосовой ассистент — индикатор
-Exec=env PYTHONPATH=%h/.local/opt/jarvis JARVIS_ROOT=%h/.local/opt/jarvis /usr/bin/python3 -m jarvis.tray_app_system
+Exec=env JARVIS_ROOT=%h/.local/opt/jarvis %h/.local/opt/jarvis/.venv/bin/python -m jarvis.tray_app_system
 Path=%h/.local/opt/jarvis
 Icon=%h/.local/opt/jarvis/assets/jarvis.svg
 Terminal=false

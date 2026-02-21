@@ -6,11 +6,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/opt/jarvis
-ExecStart=%h/.local/opt/jarvis/.venv/bin/python -m jarvis --config %h/.local/opt/jarvis/config.yaml
+ExecStart=%h/.local/opt/jarvis/.venv/bin/python -m jarvis --config %h/.config/jarvis/config.yaml
 Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=HF_HOME=%h/.local/opt/jarvis/models/hf
+Environment=JARVIS_ROOT=%h/.local/opt/jarvis
+Environment=JARVIS_STATUS=%h/.local/state/jarvis/status.json
 
 [Install]
 WantedBy=default.target

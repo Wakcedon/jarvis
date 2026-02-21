@@ -24,6 +24,7 @@ fi
 sudo apt-get install -y \
   python3.11-venv \
   python3.11-dev \
+  python3-tk \
   build-essential \
   curl \
   unzip \

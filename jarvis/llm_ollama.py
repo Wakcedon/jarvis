@@ -139,6 +139,50 @@ class OllamaClient:
         text = "".join(acc).strip()
         return _truncate_sentences(text, int(max_sentences)).strip()
 
+    def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        num_predict: int,
+        temperature: float,
+        num_ctx: int,
+        num_thread: int,
+        keep_alive: str | None = None,
+    ):
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+            "options": {
+                "num_predict": int(num_predict),
+                "temperature": float(temperature),
+                "num_ctx": int(num_ctx),
+                "num_thread": int(num_thread),
+            },
+        }
+        if keep_alive is not None:
+            payload["keep_alive"] = str(keep_alive)
+
+        try:
+            with requests.post(
+                f"{self._base_url}/api/chat",
+                json=payload,
+                stream=True,
+                timeout=(3, self._timeout_s),
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    msg = (obj.get("message") or {}).get("content") or ""
+                    if msg:
+                        yield str(msg)
+                    if obj.get("done") is True:
+                        break
+        except requests.RequestException as e:
+            raise OllamaUnavailable(str(e)) from e
+
 
 def _count_sentences(text: str) -> int:
     import re

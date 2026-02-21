@@ -5,9 +5,9 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/opt/jarvis
-Environment=PYTHONPATH=%h/.local/opt/jarvis
 Environment=JARVIS_ROOT=%h/.local/opt/jarvis
-ExecStart=/usr/bin/python3 -m jarvis.tray_app_system
+Environment=JARVIS_STATUS=%h/.local/state/jarvis/status.json
+ExecStart=%h/.local/opt/jarvis/.venv/bin/python -m jarvis.tray_app_system
 Restart=on-failure
 RestartSec=2
 

@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import os
+
 import yaml
+
+from jarvis.paths import get_paths
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +22,8 @@ class AudioConfig:
     activation_feedback: str = "tts"  # tts|beep|none
     activation_text: str = "Слушаю."
     activation_delay_s: float = 0.05
+    barge_in_enabled: bool = True
+    barge_in_rms_threshold: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,13 @@ class WakeWordConfig:
     vosk_model_path: Path = PROJECT_ROOT / "models" / "vosk-model-small-ru-0.22"
     blocksize: int = 1600
     min_rms: float = 0.0
+    min_confidence: float = 0.50
+    use_partial: bool = True
+    partial_hits: int = 2
+    cooldown_s: float = 1.2
+    confirm_window_s: float = 1.0
+    noise_gate_multiplier: float = 3.2
+    noise_ema_alpha: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -94,6 +107,7 @@ class LLMConfig:
     ollama_num_thread: int = 4
     ollama_keep_alive: str = "30m"
     fast_mode: bool = True
+    stream_to_tts: bool = True
     fast_max_sentences: int = 1
     fast_max_chars: int = 260
     warmup_on_start: bool = True
@@ -121,6 +135,29 @@ class UIConfig:
 
 
 @dataclass(frozen=True)
+class StorageConfig:
+    backend: str = "sqlite"  # sqlite|files
+    db_path: Path = PROJECT_ROOT / "data" / "jarvis.sqlite3"
+
+
+@dataclass(frozen=True)
+class CapabilitiesConfig:
+    can_open_urls: bool = True
+    can_open_paths: bool = True
+    can_launch_apps: bool = True
+    can_desktop_launch: bool = True
+    can_volume: bool = True
+    can_mic_mute: bool = True
+    can_network: bool = True
+    can_media: bool = True
+    can_window: bool = True
+    can_clipboard: bool = True
+    can_screenshots: bool = True
+    can_shell: bool = False
+    can_power: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     audio: AudioConfig = AudioConfig()
     wake_word: WakeWordConfig = WakeWordConfig()
@@ -130,6 +167,8 @@ class Config:
     llm: LLMConfig = LLMConfig()
     commands: CommandsConfig = CommandsConfig()
     ui: UIConfig = UIConfig()
+    storage: StorageConfig = StorageConfig()
+    capabilities: CapabilitiesConfig = CapabilitiesConfig()
 
 
 def _get(d: dict[str, Any], key: str, default: Any) -> Any:
@@ -141,11 +180,22 @@ def _get(d: dict[str, Any], key: str, default: Any) -> Any:
 def load_config(config_path: str | Path) -> Config:
     path = Path(config_path)
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
+        # Prefer JARVIS_ROOT (for XDG config) and fallback to project root.
+        root = Path(os.environ.get("JARVIS_ROOT") or PROJECT_ROOT).expanduser().resolve()
+        path = root / path
 
     raw: dict[str, Any] = {}
     if path.exists():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    # Optional: validate and fill defaults via Pydantic (does not break old configs).
+    try:
+        from jarvis.config_model import ConfigModel
+
+        m = ConfigModel.model_validate(raw)
+        raw = m.model_dump(mode="python")
+    except Exception:
+        pass
 
     audio_raw = _get(raw, "audio", {})
     wake_raw = _get(raw, "wake_word", {})
@@ -155,6 +205,8 @@ def load_config(config_path: str | Path) -> Config:
     llm_raw = _get(raw, "llm", {})
     cmd_raw = _get(raw, "commands", {})
     ui_raw = _get(raw, "ui", {})
+    storage_raw = _get(raw, "storage", {})
+    caps_raw = _get(raw, "capabilities", {})
 
     audio = AudioConfig(
         sample_rate=int(_get(audio_raw, "sample_rate", 16000)),
@@ -163,6 +215,8 @@ def load_config(config_path: str | Path) -> Config:
         activation_feedback=str(_get(audio_raw, "activation_feedback", "tts")),
         activation_text=str(_get(audio_raw, "activation_text", "Да, слушаю.")),
         activation_delay_s=float(_get(audio_raw, "activation_delay_s", 0.15)),
+        barge_in_enabled=bool(_get(audio_raw, "barge_in_enabled", True)),
+        barge_in_rms_threshold=float(_get(audio_raw, "barge_in_rms_threshold", 0.02)),
     )
 
     wake = WakeWordConfig(
@@ -171,6 +225,13 @@ def load_config(config_path: str | Path) -> Config:
         vosk_model_path=_resolve_path(_get(wake_raw, "vosk_model_path", "models/vosk-model-small-ru-0.22")),
         blocksize=int(_get(wake_raw, "blocksize", 1600)),
         min_rms=float(_get(wake_raw, "min_rms", 0.0)),
+        min_confidence=float(_get(wake_raw, "min_confidence", 0.65)),
+        use_partial=bool(_get(wake_raw, "use_partial", False)),
+        partial_hits=int(_get(wake_raw, "partial_hits", 3)),
+        cooldown_s=float(_get(wake_raw, "cooldown_s", 1.2)),
+        confirm_window_s=float(_get(wake_raw, "confirm_window_s", 1.0)),
+        noise_gate_multiplier=float(_get(wake_raw, "noise_gate_multiplier", 3.2)),
+        noise_ema_alpha=float(_get(wake_raw, "noise_ema_alpha", 0.02)),
     )
 
     recording = RecordingConfig(
@@ -234,6 +295,7 @@ def load_config(config_path: str | Path) -> Config:
         ollama_num_thread=int(_get(llm_raw, "ollama_num_thread", 4)),
         ollama_keep_alive=str(_get(llm_raw, "ollama_keep_alive", "30m")),
         fast_mode=bool(_get(llm_raw, "fast_mode", True)),
+        stream_to_tts=bool(_get(llm_raw, "stream_to_tts", True)),
         fast_max_sentences=int(_get(llm_raw, "fast_max_sentences", 1)),
         fast_max_chars=int(_get(llm_raw, "fast_max_chars", 260)),
         warmup_on_start=bool(_get(llm_raw, "warmup_on_start", True)),
@@ -253,18 +315,71 @@ def load_config(config_path: str | Path) -> Config:
         allow_desktop_launch=bool(_get(cmd_raw, "allow_desktop_launch", True)),
     )
 
+    default_status_path = str(get_paths().status_path)
+    raw_status_path = os.environ.get("JARVIS_STATUS")
+    if raw_status_path is None:
+        raw_status_path = _get(ui_raw, "status_path", None)
+
+    if raw_status_path is None:
+        resolved_status_path = default_status_path
+    else:
+        raw_str = str(raw_status_path).strip()
+        if not raw_str or raw_str.lower() in ("auto", "xdg"):
+            resolved_status_path = default_status_path
+        else:
+            resolved_status_path = _resolve_path(raw_str)
+
     ui = UIConfig(
         mic_level_threshold=float(_get(ui_raw, "mic_level_threshold", 0.02)),
-        status_path=_resolve_path(_get(ui_raw, "status_path", "runtime/status.json")),
+        status_path=resolved_status_path,
     )
 
-    return Config(audio=audio, wake_word=wake, recording=recording, stt=stt, tts=tts, llm=llm, commands=commands, ui=ui)
+    storage_backend = str(_get(storage_raw, "backend", "sqlite")).strip().lower() or "sqlite"
+    default_db = get_paths().db_path
+    raw_db_path = _get(storage_raw, "db_path", str(default_db))
+    if raw_db_path is None or (isinstance(raw_db_path, str) and not raw_db_path.strip()):
+        raw_db_path = str(default_db)
+    storage = StorageConfig(
+        backend=storage_backend,
+        db_path=_resolve_path(str(raw_db_path)),
+    )
+
+    # By default, capabilities follow previous command toggles.
+    capabilities = CapabilitiesConfig(
+        can_open_urls=bool(_get(caps_raw, "can_open_urls", True)),
+        can_open_paths=bool(_get(caps_raw, "can_open_paths", True)),
+        can_launch_apps=bool(_get(caps_raw, "can_launch_apps", True)),
+        can_desktop_launch=bool(_get(caps_raw, "can_desktop_launch", commands.allow_desktop_launch)),
+        can_volume=bool(_get(caps_raw, "can_volume", True)),
+        can_mic_mute=bool(_get(caps_raw, "can_mic_mute", True)),
+        can_network=bool(_get(caps_raw, "can_network", True)),
+        can_media=bool(_get(caps_raw, "can_media", True)),
+        can_window=bool(_get(caps_raw, "can_window", True)),
+        can_clipboard=bool(_get(caps_raw, "can_clipboard", True)),
+        can_screenshots=bool(_get(caps_raw, "can_screenshots", True)),
+        can_shell=bool(_get(caps_raw, "can_shell", commands.allow_shell)),
+        can_power=bool(_get(caps_raw, "can_power", True)),
+    )
+
+    return Config(
+        audio=audio,
+        wake_word=wake,
+        recording=recording,
+        stt=stt,
+        tts=tts,
+        llm=llm,
+        commands=commands,
+        ui=ui,
+        storage=storage,
+        capabilities=capabilities,
+    )
 
 
 def _resolve_path(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
+        root = Path(os.environ.get("JARVIS_ROOT") or PROJECT_ROOT).expanduser().resolve()
+        path = root / path
     return path
 
 

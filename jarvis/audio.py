@@ -14,6 +14,88 @@ import soundfile as sf
 import shutil
 import subprocess
 from tempfile import NamedTemporaryFile
+import threading
+
+
+def _resample_int16(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    if src_sr == dst_sr:
+        return x
+    if x.size == 0:
+        return x
+
+    src_sr = int(src_sr)
+    dst_sr = int(dst_sr)
+
+    # fast path: integer downsample by decimation
+    if src_sr % dst_sr == 0:
+        k = src_sr // dst_sr
+        if k > 1:
+            return x[::k].astype(np.int16, copy=False)
+
+    # generic linear resample
+    src_len = int(x.size)
+    dst_len = max(1, int(round(src_len * (dst_sr / float(src_sr)))))
+    xp = np.linspace(0.0, 1.0, num=src_len, endpoint=False, dtype=np.float32)
+    xq = np.linspace(0.0, 1.0, num=dst_len, endpoint=False, dtype=np.float32)
+    y = np.interp(xq, xp, x.astype(np.float32))
+    y = np.clip(y, -32768.0, 32767.0)
+    return y.astype(np.int16)
+
+
+def _open_raw_input_stream(
+    *,
+    desired_sr: int,
+    device: int | str | None,
+    blocksize: int,
+):
+    """Open input stream; if desired sample rate is unsupported, fallback to device default SR."""
+
+    desired_sr = int(desired_sr)
+    blocksize = int(blocksize)
+
+    # If the selected device has a different default SR (common: 48000),
+    # prefer opening at default SR to avoid PortAudio/ALSA error spam.
+    fallback_sr = desired_sr
+    try:
+        if device is None:
+            dev_info = sd.query_devices(kind="input")
+        else:
+            dev_info = sd.query_devices(device)
+        fallback_sr = int(float(dev_info.get("default_samplerate", 0.0) or 0.0) or desired_sr)
+    except Exception:
+        fallback_sr = desired_sr
+
+    prefer_fallback = (device is not None) and (fallback_sr != desired_sr)
+
+    if not prefer_fallback:
+        try:
+            stream = sd.RawInputStream(
+                samplerate=desired_sr,
+                device=device,
+                dtype="int16",
+                channels=1,
+                blocksize=blocksize,
+            )
+            stream.start()
+            return stream, desired_sr
+        except Exception:
+            pass
+
+    # Fallback: open at device default samplerate.
+
+    # Keep same time duration for blocks.
+    block_dur_s = blocksize / float(max(1, desired_sr))
+    blocksize_fb = max(1, int(round(int(fallback_sr) * block_dur_s)))
+
+    stream = sd.RawInputStream(
+        samplerate=int(fallback_sr),
+        device=device,
+        dtype="int16",
+        channels=1,
+        blocksize=int(blocksize_fb),
+    )
+    stream.start()
+    return stream, int(fallback_sr)
 
 
 def beep(sample_rate: int, output_device: int | str | None = None, duration_s: float = 0.12, freq_hz: float = 880.0) -> None:
@@ -23,7 +105,7 @@ def beep(sample_rate: int, output_device: int | str | None = None, duration_s: f
     sd.wait()
 
 
-def play_wav(path: Path, output_device: int | str | None = None) -> None:
+def play_wav(path: Path, output_device: int | str | None = None, *, stop_event: threading.Event | None = None) -> None:
     # Читаем WAV и делаем safety-обработку: лимитер + короткий fade,
     # чтобы убрать щелчки/артефакты и не допустить слишком громкого шума.
     data, sr = sf.read(path, dtype="float32", always_2d=False)
@@ -49,15 +131,50 @@ def play_wav(path: Path, output_device: int | str | None = None) -> None:
     if output_device is None and (shutil.which("paplay") or shutil.which("aplay")):
         with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
             sf.write(tmp.name, data, sr, subtype="PCM_16")
-            if shutil.which("paplay"):
-                subprocess.run(["paplay", tmp.name], check=False)
+            cmd = ["paplay", tmp.name] if shutil.which("paplay") else ["aplay", "-q", tmp.name]
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                proc = None
+            if proc is None:
                 return
-            subprocess.run(["aplay", "-q", tmp.name], check=False)
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.03)
             return
 
     # Fallback: sounddevice
     sd.play(data, sr, device=output_device)
-    sd.wait()
+    stream = None
+    try:
+        stream = sd.get_stream()
+    except Exception:
+        stream = None
+    # Poll, so a stop_event can interrupt.
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            try:
+                sd.stop()
+            except Exception:
+                pass
+            break
+        if stream is None:
+            # fallback: blocking wait
+            sd.wait()
+            break
+        try:
+            if not stream.active:
+                break
+        except Exception:
+            break
+        time.sleep(0.03)
 
 
 @dataclass(frozen=True)
@@ -86,7 +203,9 @@ def record_utterance(
 ) -> RecordedAudio:
     """Записывает фразу: ждёт начала речи по энергии, затем пишет до паузы."""
 
-    chunk = int(sample_rate * (chunk_ms / 1000.0))
+    desired_sr = int(sample_rate)
+    chunk_dur_s = float(chunk_ms) / 1000.0
+    chunk_out = int(desired_sr * chunk_dur_s)
     audio_chunks: list[np.ndarray] = []
 
     started = False
@@ -95,7 +214,7 @@ def record_utterance(
 
     # Кольцевой буфер для "начала фразы" (чтобы не отрезать первые слоги)
     pre_roll_chunks: deque[np.ndarray] = deque(
-        maxlen=max(1, int((max(0.0, pre_roll_s) * sample_rate) / max(1, chunk)))
+        maxlen=max(1, int((max(0.0, pre_roll_s) * desired_sr) / max(1, chunk_out)))
     )
 
     effective_threshold = float(start_threshold)
@@ -109,23 +228,31 @@ def record_utterance(
     started_ts: float | None = None
     peak_rms = 0.0
     min_after_start_s = 0.25
+    # In start_immediately mode we start buffering right away, but we must not
+    # end the recording before the user actually begins speaking.
+    speech_started = (not start_immediately)
+    # Many USB mics are quiet at 16k pipeline (rms ~0.001-0.004). We use a low
+    # onset threshold so the user can speak normally after wake word.
+    speech_start_rms = max(0.0010, float(start_threshold) * 0.15)
 
-    with sd.RawInputStream(
-        samplerate=sample_rate,
-        device=input_device,
-        dtype="int16",
-        channels=1,
-        blocksize=chunk,
-    ) as stream:
+    # Open stream with SR fallback; resample to desired SR if needed.
+    stream, actual_sr = _open_raw_input_stream(desired_sr=desired_sr, device=input_device, blocksize=max(1, chunk_out))
+    chunk_in = max(1, int(round(int(actual_sr) * chunk_dur_s)))
+    try:
         while True:
             if time.monotonic() - start_time > max_s:
                 break
 
-            data, _overflowed = stream.read(chunk)
+            data, _overflowed = stream.read(chunk_in)
             data_bytes = bytes(data)
             samples = np.frombuffer(data_bytes, dtype=np.int16)
             if samples.size == 0:
                 continue
+
+            if actual_sr != desired_sr:
+                samples = _resample_int16(samples, int(actual_sr), int(desired_sr))
+                if samples.size == 0:
+                    continue
 
             pre_roll_chunks.append(samples.copy())
 
@@ -140,12 +267,14 @@ def record_utterance(
                     pass
 
             # После wake word лучше начинать запись сразу: пороги часто промахиваются.
+            # Но тишину до начала речи НЕ считаем как конец записи.
             if start_immediately and not started:
                 started = True
-                started_ts = time.monotonic()
+                started_ts = None
                 record_utterance.last_started = True  # type: ignore[attr-defined]
                 audio_chunks.extend(list(pre_roll_chunks))
                 pre_roll_chunks.clear()
+                # keep buffering until speech actually starts
                 continue
 
             # Автокалибровка порога старта по шуму помещения (до начала речи)
@@ -177,6 +306,14 @@ def record_utterance(
 
             peak_rms = max(peak_rms, rms)
 
+            if not speech_started:
+                # Wait for real speech onset; don't stop on silence yet.
+                if rms >= speech_start_rms:
+                    speech_started = True
+                    started_ts = time.monotonic()
+                else:
+                    continue
+
             # Тишина после старта: адаптируем порог под реальный уровень речи,
             # иначе на тихих микрофонах запись обрывается мгновенно.
             silence_threshold = max(0.002, peak_rms * 0.25, effective_threshold * 0.25)
@@ -185,11 +322,21 @@ def record_utterance(
                 continue
 
             if rms < silence_threshold:
-                silence_s += chunk / sample_rate
+                silence_s += chunk_dur_s
                 if silence_s >= end_silence_s:
                     break
             else:
                 silence_s = 0.0
+
+    finally:
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
     if not audio_chunks:
         return RecordedAudio(pcm16=np.zeros((0,), dtype=np.int16), sample_rate=sample_rate)
@@ -223,21 +370,35 @@ def raw_mic_stream(
 ):
     """Генератор байтов int16 из микрофона (для Vosk)."""
 
-    q: queue.Queue[bytes] = queue.Queue()
+    desired_sr = int(sample_rate)
+    block_out = int(blocksize)
+    block_dur_s = block_out / float(max(1, desired_sr))
 
-    def callback(indata, frames, time_info, status):
-        if status:
-            # не печатаем в stdout, чтобы не мешать логам; можно расширить позже
-            pass
-        q.put(bytes(indata))
-
-    with sd.RawInputStream(
-        samplerate=sample_rate,
-        blocksize=blocksize,
+    # We intentionally do not use callback mode here: we need resampling fallback.
+    stream, actual_sr = _open_raw_input_stream(
+        desired_sr=desired_sr,
         device=input_device,
-        dtype="int16",
-        channels=1,
-        callback=callback,
-    ):
+        blocksize=max(1, int(round(int(desired_sr) * block_dur_s))),
+    )
+    block_in = max(1, int(round(int(actual_sr) * block_dur_s)))
+
+    try:
         while True:
-            yield q.get()
+            data, _overflowed = stream.read(block_in)
+            samples = np.frombuffer(bytes(data), dtype=np.int16)
+            if samples.size == 0:
+                continue
+            if actual_sr != desired_sr:
+                samples = _resample_int16(samples, int(actual_sr), int(desired_sr))
+                if samples.size == 0:
+                    continue
+            yield samples.astype(np.int16, copy=False).tobytes()
+    finally:
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass

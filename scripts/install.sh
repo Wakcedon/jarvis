@@ -23,6 +23,7 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip wheel setuptools
 pip install -r requirements.txt
+pip install -e .
 
 echo "[4/6] Скачивание моделей (Vosk + Piper + Whisper)…"
 bash scripts/download_models.sh
@@ -60,7 +61,6 @@ cp -f systemd/user/ollama.service "$HOME/.config/systemd/user/ollama.service"
 systemctl --user daemon-reload
 systemctl --user enable --now ollama.service
 
-done
 echo "Скачиваю LLM модели (fast + quality)…"
 FAST_MODEL="${FAST_MODEL:-qwen2.5:0.5b-instruct}"
 QUALITY_MODEL="${QUALITY_MODEL:-qwen2.5:1.5b-instruct}"
@@ -91,6 +91,10 @@ path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encodi
 print("LLM configured:", llm["fast_model"], "/", llm["quality_model"])
 PY
 
+echo "Копирую конфиг в ~/.config/jarvis/config.yaml (XDG)…"
+mkdir -p "$HOME/.config/jarvis"
+cp -f "$DEST_DIR/config.yaml" "$HOME/.config/jarvis/config.yaml"
+
 echo "Установка ярлыка и systemd user сервисов (jarvis + tray)…"
 mkdir -p "$HOME/.local/share/applications"
 cp -f desktop/jarvis-tray.desktop "$HOME/.local/share/applications/jarvis-tray.desktop"
@@ -102,6 +106,28 @@ systemctl --user enable --now jarvis-tray.service
 
 # сам ассистент можно включить сразу, но если микрофон будет занят — лучше запускать из трея
 systemctl --user enable --now jarvis.service
+
+echo "Устанавливаю команду 'jarvis' в ~/.local/bin (wrapper)…"
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/jarvis" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+JARVIS_DIR="$HOME/.local/opt/jarvis"
+exec "$JARVIS_DIR/.venv/bin/jarvis" "$@"
+SH
+chmod +x "$HOME/.local/bin/jarvis"
+
+cat > "$HOME/.local/bin/jarvis-ui" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+JARVIS_DIR="$HOME/.local/opt/jarvis"
+exec "$JARVIS_DIR/.venv/bin/python" -m jarvis ui "$@"
+SH
+chmod +x "$HOME/.local/bin/jarvis-ui"
+
+echo "Если команда 'jarvis' всё ещё не находится, добавьте ~/.local/bin в PATH (обычно уже добавлено в Ubuntu)."
 
 echo "[6/6] Готово. Иконка Jarvis должна появиться в трее."
 echo "Если не появилась — перезайдите в сессию или выполните: systemctl --user restart jarvis-tray.service"

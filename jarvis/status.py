@@ -19,6 +19,11 @@ class StatusSnapshot:
     last_error: str = ""
     recording_threshold: float = 0.0
     recording_gain: float = 1.0
+    latency_record_ms: float = 0.0
+    latency_stt_ms: float = 0.0
+    latency_llm_ms: float = 0.0
+    latency_tts_ms: float = 0.0
+    latency_total_ms: float = 0.0
 
 
 class StatusWriter:
@@ -39,6 +44,11 @@ class StatusWriter:
         last_error: str | None = None,
         recording_threshold: float | None = None,
         recording_gain: float | None = None,
+        latency_record_ms: float | None = None,
+        latency_stt_ms: float | None = None,
+        latency_llm_ms: float | None = None,
+        latency_tts_ms: float | None = None,
+        latency_total_ms: float | None = None,
         force: bool = False,
     ) -> None:
         now = time.time()
@@ -68,6 +78,17 @@ class StatusWriter:
         if recording_gain is not None:
             self._snapshot.recording_gain = float(recording_gain)
 
+        if latency_record_ms is not None:
+            self._snapshot.latency_record_ms = float(latency_record_ms)
+        if latency_stt_ms is not None:
+            self._snapshot.latency_stt_ms = float(latency_stt_ms)
+        if latency_llm_ms is not None:
+            self._snapshot.latency_llm_ms = float(latency_llm_ms)
+        if latency_tts_ms is not None:
+            self._snapshot.latency_tts_ms = float(latency_tts_ms)
+        if latency_total_ms is not None:
+            self._snapshot.latency_total_ms = float(latency_total_ms)
+
         self._snapshot.last_update_ts = now
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         tmp.write_text(
@@ -83,6 +104,11 @@ class StatusWriter:
                     "last_answer": self._snapshot.last_answer,
                     "last_answer_ts": self._snapshot.last_answer_ts,
                     "last_error": self._snapshot.last_error,
+                    "latency_record_ms": self._snapshot.latency_record_ms,
+                    "latency_stt_ms": self._snapshot.latency_stt_ms,
+                    "latency_llm_ms": self._snapshot.latency_llm_ms,
+                    "latency_tts_ms": self._snapshot.latency_tts_ms,
+                    "latency_total_ms": self._snapshot.latency_total_ms,
                     "ts": self._snapshot.last_update_ts,
                 },
                 ensure_ascii=False,

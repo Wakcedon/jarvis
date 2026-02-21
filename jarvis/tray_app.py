@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jarvis.config import load_config
+from jarvis.yaml_config import set_dotted_bool
 
 
 def _try_import_indicator():
@@ -48,28 +49,7 @@ def _systemctl_user(*args: str) -> None:
 
 
 def _edit_config_bool(config_path: Path, dotted_key: str, value: bool) -> None:
-    raw = config_path.read_text(encoding="utf-8")
-    # супер-простой патч YAML под наши известные ключи (минимум зависимостей)
-    # dotted_key: wake_word.enabled / llm.enabled
-    key = dotted_key.split(".")[-1]
-    section = dotted_key.split(".")[0]
-    lines = raw.splitlines()
-    out: list[str] = []
-    in_section = False
-    changed = False
-    for line in lines:
-        if line.strip().endswith(":") and not line.startswith(" "):
-            in_section = line.strip() == f"{section}:"
-        if in_section and line.strip().startswith(f"{key}:"):
-            indent = line.split(key)[0]
-            out.append(f"{indent}{key}: {'true' if value else 'false'}")
-            changed = True
-        else:
-            out.append(line)
-    if not changed:
-        out.append(f"{section}:")
-        out.append(f"  {key}: {'true' if value else 'false'}")
-    config_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    set_dotted_bool(config_path, dotted_key, value)
 
 
 def main() -> None:

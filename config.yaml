@@ -1,23 +1,25 @@
 audio:
   sample_rate: 16000
-  input_device: null
-  output_device: null
-  activation_feedback: "tts"   # tts|beep|none
+  input_device: 5
+  output_device:
+  activation_feedback: "beep"  # tts|beep|none
   activation_text: "Слушаю."
-  activation_delay_s: 0.02
+  activation_delay_s: 0.15
+  barge_in_enabled: true
+  barge_in_rms_threshold: 0.02
 
 recording:
-  max_s: 5.0
+  max_s: 4.0
   start_threshold: 0.015
   auto_threshold: true
   noise_calibrate_s: 0.4
   threshold_multiplier: 3.5
   start_immediately_after_wakeword: true
-  pre_roll_s: 0.25
+  pre_roll_s: 0.35
   auto_gain: true
-  target_rms: 0.03
-  max_gain: 25.0
-  end_silence_s: 0.45
+  target_rms: 0.05
+  max_gain: 60
+  end_silence_s: 0.35
   chunk_ms: 20
 
 wake_word:
@@ -27,7 +29,14 @@ wake_word:
     - "ассистент"
   vosk_model_path: "models/vosk-model-small-ru-0.22"
   blocksize: 1600
-  min_rms: 0.010
+  min_rms: 0.004
+  min_confidence: 0.65
+  use_partial: true
+  partial_hits: 2
+  cooldown_s: 0.8
+  confirm_window_s: 1.0
+  noise_gate_multiplier: 3.8
+  noise_ema_alpha: 0.02
 
 stt:
   backend: "faster-whisper"
@@ -38,23 +47,24 @@ stt:
   cpu_threads: 4
   num_workers: 1
   language: "ru"
-  beam_size: 2
-  vad_filter: true
+  beam_size: 3
+  vad_filter: false
   initial_prompt: "Разговор на русском языке."
   min_avg_logprob: -1.2
   max_no_speech_prob: 0.6
 
 ui:
   mic_level_threshold: 0.02
-  status_path: "runtime/status.json"
+  # auto = XDG ~/.local/state/jarvis/status.json (рекомендуется)
+  status_path: "auto"
 
 tts:
   backend: "piper"
   model_path: "models/piper/ru_RU-dmitri-medium.onnx"
   config_path: "models/piper/ru_RU-dmitri-medium.onnx.json"
-  speaker: null
-  length_scale: 0.88
-  sentence_silence: 0.15
+  speaker:
+  length_scale: 0.84
+  sentence_silence: 0.12
   volume: 0.6
 
 llm:
@@ -69,17 +79,37 @@ llm:
   disable_if_unreachable: true
   autostart: true
   auto_pull_model: false
-  num_predict: 64
+  num_predict: 48
   temperature: 0.2
   history_max_messages: 8
   llamacpp_base_url: "http://localhost:8080"  # если backend=llamacpp
-  ollama_num_ctx: 1024
+  ollama_num_ctx: 768
   ollama_num_thread: 4
   ollama_keep_alive: "30m"
   fast_mode: true
+  stream_to_tts: true
   fast_max_sentences: 1
   fast_max_chars: 260
   warmup_on_start: true
+
+storage:
+  backend: "sqlite"             # sqlite|files
+  # db_path: "~/.local/share/jarvis/jarvis.sqlite3"  # опционально
+
+capabilities:
+  can_open_urls: true
+  can_open_paths: true
+  can_launch_apps: true
+  can_desktop_launch: true
+  can_volume: true
+  can_mic_mute: true
+  can_network: true
+  can_media: true
+  can_window: true
+  can_clipboard: true
+  can_screenshots: true
+  can_shell: false
+  can_power: true
 
 commands:
   notes_path: "data/notes.md"

@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 import sys
 import shutil
 import re
+import time
 
 from jarvis.audio import play_wav
 from jarvis.text_normalize_ru import normalize_for_tts
@@ -35,7 +36,17 @@ class PiperTTS:
         self._sentence_silence = float(sentence_silence)
         self._volume = float(volume)
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._current_proc: subprocess.Popen[bytes] | None = None
         self.last_error: str = ""
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        try:
+            if self._current_proc is not None and self._current_proc.poll() is None:
+                self._current_proc.terminate()
+        except Exception:
+            pass
 
     def speak(
         self,
@@ -54,6 +65,7 @@ class PiperTTS:
         vol = self._volume if volume is None else float(volume)
 
         with self._lock:
+            self._stop_event.clear()
             for chunk in _split_text(text):
                 self._speak_inner(chunk, length_scale=ls, sentence_silence=ss, volume=vol)
 
@@ -63,7 +75,9 @@ class PiperTTS:
             # piper CLI устанавливается вместе с piper-tts
             try:
                 piper_exe = _resolve_piper_executable()
-                subprocess.run(
+                if self._stop_event.is_set():
+                    return
+                proc = subprocess.Popen(
                     [
                         str(piper_exe),
                         "--model",
@@ -79,10 +93,33 @@ class PiperTTS:
                         "--volume",
                         str(volume),
                     ],
-                    input=text.encode("utf-8"),
-                    check=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                play_wav(Path(tmp.name), output_device=self._output_device)
+                self._current_proc = proc
+                try:
+                    if proc.stdin is not None:
+                        proc.stdin.write(text.encode("utf-8"))
+                        proc.stdin.close()
+                except Exception:
+                    pass
+
+                while proc.poll() is None:
+                    if self._stop_event.is_set():
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        return
+                    time.sleep(0.03)
+
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode or 1, "piper")
+
+                if self._stop_event.is_set():
+                    return
+                play_wav(Path(tmp.name), output_device=self._output_device, stop_event=self._stop_event)
                 self.last_error = ""
             except FileNotFoundError:
                 self.last_error = "не найден бинарь piper"
@@ -93,6 +130,8 @@ class PiperTTS:
             except Exception as e:
                 self.last_error = str(e)
                 print(f"TTS: ошибка: {e}. Озвучка отключена.", file=sys.stderr)
+            finally:
+                self._current_proc = None
 
 
 def _split_text(text: str, max_chars: int = 220) -> list[str]:

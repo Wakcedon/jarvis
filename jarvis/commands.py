@@ -17,6 +17,8 @@ from typing import Any
 import requests
 
 from jarvis.desktop_apps import find_app, launch_app
+from jarvis.storage import SQLiteStorage
+from jarvis.executor import SystemExecutor
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,9 @@ class CommandRouter:
         weather_cache_path: Path,
         reminders_path: Path,
         todo_path: Path,
+        storage: SQLiteStorage | None,
+        storage_backend: str,
+        executor: SystemExecutor,
         screenshots_dir: Path,
         default_browser_url: str,
         default_city: str,
@@ -80,6 +85,9 @@ class CommandRouter:
         self._weather_cache_path = weather_cache_path
         self._reminders_path = reminders_path
         self._todo_path = todo_path
+        self._storage = storage
+        self._storage_backend = (storage_backend or "files").strip().lower()
+        self._executor = executor
         self._screenshots_dir = screenshots_dir
         self._default_browser_url = default_browser_url
         self._default_city = default_city
@@ -141,7 +149,13 @@ class CommandRouter:
 
         # --- Todo ---
         if t in {"покажи задачи", "список задач", "todo", "туду", "дела"}:
-            items = _todo_load(self._todo_path)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                items = [
+                    {"id": x.id, "text": x.text, "done": x.done}
+                    for x in self._storage.todo_list()
+                ]
+            else:
+                items = _todo_load(self._todo_path)
             if not items:
                 return CommandResponse(text="Список задач пуст.")
             undone = [x for x in items if not x.get("done")]
@@ -158,24 +172,39 @@ class CommandRouter:
             item_text = m.group(1).strip()
             if not item_text:
                 return CommandResponse(text="Скажи текст задачи после «добавь задачу». ")
-            new_id = _todo_add(self._todo_path, item_text)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                new_id = self._storage.todo_add(item_text)
+            else:
+                new_id = _todo_add(self._todo_path, item_text)
             return CommandResponse(text=f"Добавил задачу {new_id}.")
 
         m = re.search(r"\b(сделано|выполнено|закрой)\s+задач[ау]\b\s*(\d+)\b", t)
         if m:
             task_id = int(m.group(2))
-            ok = _todo_mark_done(self._todo_path, task_id, done=True)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                ok = self._storage.todo_mark_done(task_id, done=True)
+            else:
+                ok = _todo_mark_done(self._todo_path, task_id, done=True)
             return CommandResponse(text="Отметил как выполненную." if ok else "Не нашёл такую задачу.")
 
         m = re.search(r"\bудали\s+задач[ау]\b\s*(\d+)\b", t)
         if m:
             task_id = int(m.group(1))
-            ok = _todo_delete(self._todo_path, task_id)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                ok = self._storage.todo_delete(task_id)
+            else:
+                ok = _todo_delete(self._todo_path, task_id)
             return CommandResponse(text="Удалил." if ok else "Не нашёл такую задачу.")
 
         # --- Напоминания ---
         if t in {"покажи напоминания", "список напоминаний", "напоминания"}:
-            items = _reminders_load(self._reminders_path)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                items = [
+                    {"id": x.id, "text": x.text, "due_ts": x.due_ts, "fired": x.fired}
+                    for x in self._storage.reminders_list()
+                ]
+            else:
+                items = _reminders_load(self._reminders_path)
             pending = [x for x in items if not x.get("fired")]
             if not pending:
                 return CommandResponse(text="Активных напоминаний нет.")
@@ -207,13 +236,19 @@ class CommandRouter:
             if seconds <= 0:
                 return CommandResponse(text="Скажи длительность больше нуля.")
             due_ts = time.time() + seconds
-            rid = _reminders_add(self._reminders_path, due_ts=due_ts, text=msg)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                rid = self._storage.reminders_add(due_ts=due_ts, text=msg)
+            else:
+                rid = _reminders_add(self._reminders_path, due_ts=due_ts, text=msg)
             return CommandResponse(text=f"Ок. Напомню через {_fmt_duration(seconds)} (номер {rid}).")
 
         m = re.search(r"\bудали\s+напоминани[ея]\b\s*(\d+)\b", t)
         if m:
             rid = int(m.group(1))
-            ok = _reminders_delete(self._reminders_path, rid)
+            if self._storage_backend == "sqlite" and self._storage is not None:
+                ok = self._storage.reminders_delete(rid)
+            else:
+                ok = _reminders_delete(self._reminders_path, rid)
             return CommandResponse(text="Удалил." if ok else "Не нашёл такое напоминание.")
 
         # --- Таймер ---
@@ -252,40 +287,40 @@ class CommandRouter:
             return CommandResponse(text="Нормально. Чем помочь?")
 
         if re.search(r"\bоткрой\s+браузер\b", t):
-            subprocess.Popen(["xdg-open", self._default_browser_url])
-            return CommandResponse(text="Открываю браузер.")
+            ok = self._executor.open_url(self._default_browser_url)
+            return CommandResponse(text="Открываю браузер." if ok else "Не смог открыть браузер.")
 
         if t in {"открой загрузки", "открой папку загрузки"}:
-            subprocess.Popen(["xdg-open", str(Path.home() / "Загрузки")])
-            return CommandResponse(text="Открываю загрузки.")
+            ok = self._executor.open_path(Path.home() / "Загрузки")
+            return CommandResponse(text="Открываю загрузки." if ok else "Не смог открыть загрузки.")
         if t in {"открой рабочий стол", "открой десктоп"}:
-            subprocess.Popen(["xdg-open", str(Path.home() / "Рабочий стол")])
-            return CommandResponse(text="Открываю рабочий стол.")
+            ok = self._executor.open_path(Path.home() / "Рабочий стол")
+            return CommandResponse(text="Открываю рабочий стол." if ok else "Не смог открыть рабочий стол.")
         if t in {"открой документы", "открой папку документы"}:
-            subprocess.Popen(["xdg-open", str(Path.home() / "Документы")])
-            return CommandResponse(text="Открываю документы.")
+            ok = self._executor.open_path(Path.home() / "Документы")
+            return CommandResponse(text="Открываю документы." if ok else "Не смог открыть документы.")
 
         m = re.search(r"\bоткрой\s+([\w\-]+)\b", t)
         if m:
             app = m.group(1)
             if app in self._allowed_apps:
-                subprocess.Popen([app])
-                return CommandResponse(text=f"Открываю {app}.")
+                ok = self._executor.launch_app(app)
+                return CommandResponse(text=f"Открываю {app}." if ok else f"Не смог открыть {app}.")
             # fallback: поиск по .desktop (почти любое приложение)
             if self._allow_desktop_launch:
-                found = find_app(app)
-                if found and launch_app(found):
-                    return CommandResponse(text=f"Открываю {found.name}.")
+                if self._executor.launch_desktop(app):
+                    found = find_app(app)
+                    return CommandResponse(text=f"Открываю {found.name}." if found else "Открываю.")
             return CommandResponse(text=f"Я не могу открыть «{app}». Попробуй назвать как в меню приложений.")
 
         m = re.search(r"\bоткрой\s+(.+)$", t)
         if m and self._allow_desktop_launch:
             q = m.group(1).strip()
             if q:
-                found = find_app(q)
-                if found and launch_app(found):
-                    return CommandResponse(text=f"Открываю {found.name}.")
-                return CommandResponse(text=f"Не нашёл приложение «{q}». Попробуй другое название.")
+                if self._executor.launch_desktop(q):
+                    found = find_app(q)
+                    return CommandResponse(text=f"Открываю {found.name}." if found else "Открываю.")
+                return CommandResponse(text=f"Не нашёл приложение «{q}» или запуск запрещён.")
 
         m = re.search(r"\bзапиши\s+заметку\b\s*(.*)$", t)
         if m:
@@ -301,8 +336,8 @@ class CommandRouter:
             self._notes_path.parent.mkdir(parents=True, exist_ok=True)
             if not self._notes_path.exists():
                 self._notes_path.write_text("", encoding="utf-8")
-            subprocess.Popen(["xdg-open", str(self._notes_path)])
-            return CommandResponse(text="Открываю заметки.")
+            ok = self._executor.open_path(self._notes_path)
+            return CommandResponse(text="Открываю заметки." if ok else "Не смог открыть заметки.")
 
         m = re.search(r"\bнайди\s+в\s+заметках\b\s*(.+)$", t)
         if m:
@@ -330,38 +365,38 @@ class CommandRouter:
 
         # --- Скриншоты ---
         if t in {"скриншот", "сделай скриншот", "скрин"}:
-            p = _take_screenshot(self._screenshots_dir, mode="full")
+            p = self._executor.take_screenshot(self._screenshots_dir, mode="full")
             if p:
                 return CommandResponse(text="Скриншот сделал.")
             return CommandResponse(text="Не смог сделать скриншот (нет gnome-screenshot).")
 
         if t in {"скриншот окна", "скрин окна"}:
-            p = _take_screenshot(self._screenshots_dir, mode="window")
+            p = self._executor.take_screenshot(self._screenshots_dir, mode="window")
             if p:
                 return CommandResponse(text="Скриншот окна сделал.")
             return CommandResponse(text="Не смог сделать скриншот окна.")
 
         # --- Громкость / микрофон ---
         if t in {"громче", "погромче", "сделай громче"}:
-            ok = _volume_step(+5)
+            ok = self._executor.volume_step(+5)
             return CommandResponse(text="Сделал громче." if ok else "Не смог изменить громкость.")
 
         if t in {"тише", "потише", "сделай тише"}:
-            ok = _volume_step(-5)
+            ok = self._executor.volume_step(-5)
             return CommandResponse(text="Сделал тише." if ok else "Не смог изменить громкость.")
 
         m = re.search(r"\bгромкост[ьи]\s+(\d{1,3})\b", t)
         if m:
             val = max(0, min(150, int(m.group(1))))
-            ok = _volume_set_percent(val)
+            ok = self._executor.volume_set_percent(val)
             return CommandResponse(text=f"Ставлю громкость {val}%." if ok else "Не смог выставить громкость.")
 
         if t in {"выключи звук", "мут", "без звука", "выруби звук"}:
-            ok = _volume_mute(True)
+            ok = self._executor.volume_mute(True)
             return CommandResponse(text="Ок. Без звука." if ok else "Не смог выключить звук.")
 
         if t in {"включи звук", "убери мут", "со звуком"}:
-            ok = _volume_mute(False)
+            ok = self._executor.volume_mute(False)
             return CommandResponse(text="Ок." if ok else "Не смог включить звук.")
 
         if t in {"выключи микрофон", "выруби микрофон", "замуть микрофон"}:
@@ -454,12 +489,19 @@ class CommandRouter:
         if t.startswith("выполни ") and self._allow_shell:
             cmd = t.removeprefix("выполни ").strip()
             if cmd:
-                subprocess.Popen(cmd, shell=True)
-                return CommandResponse(text="Выполняю.")
+                ok = self._executor.run_shell(cmd)
+                return CommandResponse(text="Выполняю." if ok else "Запрещено политикой.")
 
         return None
 
     def _mem_get(self, key: str) -> str | None:
+        if self._storage_backend == "sqlite" and self._storage is not None:
+            try:
+                v = self._storage.mem_get(key)
+                s = str(v).strip() if v is not None else ""
+                return s or None
+            except Exception:
+                return None
         try:
             if not self._memory_path.exists():
                 return None
@@ -471,6 +513,12 @@ class CommandRouter:
             return None
 
     def _mem_set(self, key: str, value: str) -> None:
+        if self._storage_backend == "sqlite" and self._storage is not None:
+            try:
+                self._storage.mem_set(str(key), str(value))
+                return
+            except Exception:
+                pass
         try:
             self._memory_path.parent.mkdir(parents=True, exist_ok=True)
             data: dict[str, str] = {}
@@ -485,6 +533,12 @@ class CommandRouter:
             pass
 
     def _mem_clear(self) -> None:
+        if self._storage_backend == "sqlite" and self._storage is not None:
+            try:
+                self._storage.mem_clear()
+                return
+            except Exception:
+                pass
         try:
             if self._memory_path.exists():
                 self._memory_path.unlink()

@@ -26,26 +26,73 @@ from jarvis.stt_faster_whisper import FasterWhisperSTT
 from jarvis.status import StatusWriter
 from jarvis.tts_piper import PiperTTS, PiperVoice
 from jarvis.wakeword_vosk import VoskWakeWordDetector
+from jarvis.logging_setup import setup_logging
+from jarvis.storage import SQLiteStorage
+from jarvis.capabilities import Capabilities
+from jarvis.executor import SystemExecutor
+from jarvis.skills.base import SkillContext
+from jarvis.skills.builtin_commands import BuiltinCommandsSkill
+from jarvis.skills.router import SkillRouter
+from jarvis.skills.verbosity_status import VerbosityStatusSkill
+from jarvis.skills.memory import MemorySkill
+from jarvis.skills.todo import TodoSkill
+from jarvis.skills.reminders import RemindersSkill
+from jarvis.skills.timer_time import TimerTimeSkill
+from jarvis.skills.open_notes_weather import OpenNotesWeatherSkill
+from jarvis.skills.system_controls import SystemControlsSkill
+from jarvis.tts_worker import TTSWorker
+from jarvis.barge_in import BargeInConfig, BargeInMonitor
 
 
 SYSTEM_PROMPT = (
-    "Ты — локальный голосовой ассистент. Отвечай по-русски. "
-    "По умолчанию — коротко (1–2 предложения). Если пользователь просит подробнее — 3–6 предложений."
+    "Ты — локальный голосовой ассистент. Отвечай по-русски, естественно и дружелюбно, как живой помощник. "
+    "Держи ответы короткими: обычно 1–2 предложения. Если пользователь просит подробнее — 3–6 предложений. "
+    "Допускаются короткие живые связки (например: «Понял», «Хорошо», «Секунду») — но без болтовни. "
+    "Если запрос неясен — задай один уточняющий вопрос."
 )
 
 
 def run(config_path: str) -> None:
+    log = setup_logging()
     cfg = load_config(config_path)
 
     status = StatusWriter(path=cfg.ui.status_path)
     status.update(state="starting", message="Запуск…", force=True)
 
-    router = CommandRouter(
+    storage: SQLiteStorage | None = None
+    if str(cfg.storage.backend).strip().lower() == "sqlite":
+        try:
+            storage = SQLiteStorage(db_path=cfg.storage.db_path)
+        except Exception as e:
+            storage = None
+            status.update(last_error=f"storage: {e}", force=True)
+
+    caps = Capabilities(
+        can_open_urls=cfg.capabilities.can_open_urls,
+        can_open_paths=cfg.capabilities.can_open_paths,
+        can_launch_apps=cfg.capabilities.can_launch_apps,
+        can_desktop_launch=cfg.capabilities.can_desktop_launch,
+        can_volume=cfg.capabilities.can_volume,
+        can_mic_mute=cfg.capabilities.can_mic_mute,
+        can_network=cfg.capabilities.can_network,
+        can_media=cfg.capabilities.can_media,
+        can_window=cfg.capabilities.can_window,
+        can_clipboard=cfg.capabilities.can_clipboard,
+        can_screenshots=cfg.capabilities.can_screenshots,
+        can_shell=cfg.capabilities.can_shell,
+        can_power=cfg.capabilities.can_power,
+    )
+    executor = SystemExecutor(caps=caps)
+
+    legacy_router = CommandRouter(
         notes_path=cfg.commands.notes_path,
         memory_path=cfg.commands.memory_path,
         weather_cache_path=cfg.commands.weather_cache_path,
         reminders_path=cfg.commands.reminders_path,
         todo_path=cfg.commands.todo_path,
+        storage=storage,
+        storage_backend=cfg.storage.backend,
+        executor=executor,
         screenshots_dir=cfg.commands.screenshots_dir,
         default_browser_url=cfg.commands.default_browser_url,
         **{"default_city": cfg.commands.default_city},
@@ -54,44 +101,87 @@ def run(config_path: str) -> None:
         allow_desktop_launch=cfg.commands.allow_desktop_launch,
     )
 
+    skill_ctx = SkillContext(
+        storage=storage,
+        storage_backend=cfg.storage.backend,
+        executor=executor,
+        notes_path=cfg.commands.notes_path,
+        memory_path=cfg.commands.memory_path,
+        weather_cache_path=cfg.commands.weather_cache_path,
+        reminders_path=cfg.commands.reminders_path,
+        todo_path=cfg.commands.todo_path,
+        screenshots_dir=cfg.commands.screenshots_dir,
+        default_browser_url=cfg.commands.default_browser_url,
+        default_city=cfg.commands.default_city,
+        allowed_apps=set(cfg.commands.allowed_apps),
+        allow_desktop_launch=cfg.commands.allow_desktop_launch,
+        allow_shell=cfg.commands.allow_shell,
+    )
+
+    skills = SkillRouter(
+        skills=[
+            VerbosityStatusSkill(),
+            MemorySkill(),
+            TodoSkill(),
+            RemindersSkill(),
+            TimerTimeSkill(),
+            OpenNotesWeatherSkill(),
+            SystemControlsSkill(),
+            # legacy fallback (covers any commands not yet moved)
+            BuiltinCommandsSkill(router=legacy_router),
+        ]
+    )
+
     reminders_lock = threading.Lock()
 
     def reminders_worker() -> None:
-        path = cfg.commands.reminders_path
         while True:
             try:
                 now = time.time()
-                with reminders_lock:
-                    if not path.exists():
-                        time.sleep(1.0)
-                        continue
-                    data = json.loads(path.read_text(encoding="utf-8")) or {}
-                    items = data.get("items") or []
-                    changed = False
-                    due_texts: list[str] = []
-                    for it in items:
-                        if not isinstance(it, dict):
+                due_texts: list[str] = []
+
+                if storage is not None and cfg.storage.backend == "sqlite":
+                    with reminders_lock:
+                        due = storage.reminders_due_and_mark_fired(now_ts=now)
+                    for it in due:
+                        msg = str(it.text or "").strip() or "напоминание"
+                        due_texts.append(msg)
+                else:
+                    # Legacy JSON backend
+                    path = cfg.commands.reminders_path
+                    with reminders_lock:
+                        if not path.exists():
+                            time.sleep(1.0)
                             continue
-                        if it.get("fired"):
-                            continue
-                        try:
-                            due_ts = float(it.get("due_ts", 0.0) or 0.0)
-                        except Exception:
-                            continue
-                        if due_ts and due_ts <= now:
-                            it["fired"] = True
-                            changed = True
-                            msg = str(it.get("text", "") or "").strip() or "напоминание"
-                            due_texts.append(msg)
-                    if changed:
-                        tmp = path.with_suffix(path.suffix + ".tmp")
-                        tmp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                        tmp.replace(path)
+                        data = json.loads(path.read_text(encoding="utf-8")) or {}
+                        items = data.get("items") or []
+                        changed = False
+                        for it in items:
+                            if not isinstance(it, dict):
+                                continue
+                            if it.get("fired"):
+                                continue
+                            try:
+                                due_ts = float(it.get("due_ts", 0.0) or 0.0)
+                            except Exception:
+                                continue
+                            if due_ts and due_ts <= now:
+                                it["fired"] = True
+                                changed = True
+                                msg = str(it.get("text", "") or "").strip() or "напоминание"
+                                due_texts.append(msg)
+                        if changed:
+                            tmp = path.with_suffix(path.suffix + ".tmp")
+                            tmp.write_text(
+                                json.dumps({"items": items}, ensure_ascii=False, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                            tmp.replace(path)
                 for msg in due_texts:
                     ans = f"Напоминаю: {msg}."
                     status.update(state="speaking", message="Напоминание…", force=True)
                     ls, ss, vol = _tts_style(ans, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                    tts.speak(ans, length_scale=ls, sentence_silence=ss, volume=vol)
+                    tts_worker.speak_blocking(ans, length_scale=ls, sentence_silence=ss, volume=vol)
                     status.update(last_answer=ans, force=True)
                     status.update(state="idle", message="Готов")
             except Exception:
@@ -124,6 +214,30 @@ def run(config_path: str) -> None:
         sentence_silence=cfg.tts.sentence_silence,
         volume=cfg.tts.volume,
     )
+    tts_worker = TTSWorker(tts=tts)
+
+    def _speak_user(text: str) -> None:
+        bi: BargeInMonitor | None = None
+        if cfg.audio.barge_in_enabled:
+            bi = BargeInMonitor(
+                sample_rate=cfg.audio.sample_rate,
+                input_device=cfg.audio.input_device,
+                blocksize=cfg.wake_word.blocksize,
+                cfg=BargeInConfig(
+                    enabled=True,
+                    rms_threshold=cfg.audio.barge_in_rms_threshold,
+                ),
+                is_speaking=tts_worker.is_speaking,
+                on_barge_in=tts_worker.cancel_current,
+            )
+            bi.start()
+
+        try:
+            ls, ss, vol = _tts_style(text, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
+            tts_worker.speak_blocking(text, length_scale=ls, sentence_silence=ss, volume=vol)
+        finally:
+            if bi is not None:
+                bi.stop()
 
     # фоновые напоминания
     threading.Thread(target=reminders_worker, daemon=True).start()
@@ -228,6 +342,13 @@ def run(config_path: str) -> None:
             input_device=cfg.audio.input_device,
             blocksize=cfg.wake_word.blocksize,
             min_rms=cfg.wake_word.min_rms,
+            min_confidence=cfg.wake_word.min_confidence,
+            use_partial=cfg.wake_word.use_partial,
+            partial_hits=cfg.wake_word.partial_hits,
+            cooldown_s=cfg.wake_word.cooldown_s,
+            confirm_window_s=cfg.wake_word.confirm_window_s,
+            noise_gate_multiplier=cfg.wake_word.noise_gate_multiplier,
+            noise_ema_alpha=cfg.wake_word.noise_ema_alpha,
         )
 
     history: list[ChatMessage] = [ChatMessage(role="system", content=SYSTEM_PROMPT)]
@@ -258,7 +379,7 @@ def run(config_path: str) -> None:
                     status.update(state="speaking", message="Таймер")
                     s = "Таймер закончился."
                     ls, ss, vol = _tts_style(s, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                    tts.speak(s, length_scale=ls, sentence_silence=ss, volume=vol)
+                    tts_worker.speak_blocking(s, length_scale=ls, sentence_silence=ss, volume=vol)
                     status.update(state="idle", message="Готов")
                 except Exception:
                     pass
@@ -270,6 +391,9 @@ def run(config_path: str) -> None:
 
     try:
         while True:
+            turn_start = time.monotonic()
+            rec_ms = stt_ms = llm_ms = tts_ms = total_ms = 0.0
+            already_spoken = False
             if detector:
                 status.update(state="listening_wakeword", message="Слушаю ключевое слово…")
 
@@ -278,12 +402,13 @@ def run(config_path: str) -> None:
 
                 ww = detector.listen(on_mic_level=_lvl)
                 print(f"Активация: {ww.phrase}")
+                log.info("wakeword: %s", ww.phrase)
                 if cfg.audio.activation_feedback == "beep":
                     beep(cfg.audio.sample_rate, output_device=cfg.audio.output_device)
                 elif cfg.audio.activation_feedback == "tts":
                     s = cfg.audio.activation_text
                     ls, ss, vol = _tts_style(s, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                    tts.speak(s, length_scale=ls, sentence_silence=ss, volume=vol)
+                    tts_worker.speak_blocking(s, length_scale=ls, sentence_silence=ss, volume=vol)
                     if getattr(tts, "last_error", ""):
                         status.update(last_error=f"TTS: {tts.last_error}", force=True)
                 time.sleep(float(cfg.audio.activation_delay_s))
@@ -299,6 +424,7 @@ def run(config_path: str) -> None:
                 gain_now = float(getattr(record_utterance, "last_gain", 1.0))
                 status.update(mic_level=x, recording_threshold=thr_now, recording_gain=gain_now)
 
+            t0 = time.monotonic()
             recorded = record_utterance(
                 sample_rate=cfg.audio.sample_rate,
                 input_device=cfg.audio.input_device,
@@ -316,6 +442,7 @@ def run(config_path: str) -> None:
                 target_rms=cfg.recording.target_rms,
                 max_gain=cfg.recording.max_gain,
             )
+            rec_ms = (time.monotonic() - t0) * 1000.0
 
             # последний rms от record_utterance
             thr = float(getattr(record_utterance, "last_threshold", cfg.recording.start_threshold))
@@ -327,8 +454,11 @@ def run(config_path: str) -> None:
             )
 
             status.update(state="transcribing", message="Распознаю…")
+            t1 = time.monotonic()
             stt_res = stt.transcribe_pcm16(recorded.pcm16, recorded.sample_rate)
-            text = stt_res.text.strip()
+            stt_ms = (time.monotonic() - t1) * 1000.0
+            raw_text = stt_res.text.strip()
+            text = raw_text
             if not text:
                 started = bool(getattr(record_utterance, "last_started", False))
                 rms = float(getattr(record_utterance, "last_rms", 0.0))
@@ -341,9 +471,20 @@ def run(config_path: str) -> None:
                 status.update(state="idle", message=msg, force=True)
                 continue
 
+            # Если wake word выключен (open mic), отвечаем только на прямое обращение.
+            if detector is None:
+                addressed, stripped = _strip_address_prefix(text, cfg.wake_word.phrases)
+                if not addressed:
+                    # человек разговаривает не с ассистентом — молчим
+                    status.update(state="idle", message="Игнор: разговор не ко мне")
+                    continue
+                text = stripped
+
+            # Убираем обращение в начале (если пользователь сказал его вместе с запросом)
             text = re.sub(r"^(джарвис|ассистент)[\s,.:;!?-]+", "", text, flags=re.IGNORECASE).strip()
 
             print(f"Вы: {text}")
+            log.info("heard: %s", text)
             last_heard = text
             status.update(last_heard=text, force=True)
 
@@ -357,24 +498,25 @@ def run(config_path: str) -> None:
                     answer = "Ок. Отменил."
                     print(f"Jarvis: {answer}")
                     status.update(state="speaking", message="Отвечаю…")
-                    ls, ss, vol = _tts_style(answer, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                    tts.speak(answer, length_scale=ls, sentence_silence=ss, volume=vol)
+                    _speak_user(answer)
                     status.update(last_answer=answer, force=True)
                     status.update(state="idle", message="Готов")
                     continue
                 if t_low in yes or t_low.startswith("да,") or t_low.startswith("да "):
                     action = pending_action
                     pending_action = None
-                    answer = _execute_system_action(action)
+                    if not caps.can_power:
+                        answer = "Это действие запрещено политикой."
+                    else:
+                        answer = _execute_system_action(action)
                     print(f"Jarvis: {answer}")
                     status.update(state="speaking", message="Выполняю…")
-                    ls, ss, vol = _tts_style(answer, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                    tts.speak(answer, length_scale=ls, sentence_silence=ss, volume=vol)
+                    _speak_user(answer)
                     status.update(last_answer=answer, force=True)
                     status.update(state="idle", message="Готов")
                     continue
 
-            cmd = router.handle(text)
+            cmd = skills.handle(text, ctx=skill_ctx)
             if cmd is not None:
                 if isinstance(cmd, TimerSetResponse):
                     with timer_lock:
@@ -412,10 +554,24 @@ def run(config_path: str) -> None:
                 else:
                     answer = cmd.text
             elif (ollama_quality is not None) or (llamacpp_llm is not None):
+                # Если это короткая фраза после wake word, но ни один навык не сработал,
+                # лучше переспросить, чем отправлять мусор в LLM.
+                if detector is not None:
+                    short_tokens = [x for x in re.split(r"\s+", text.strip()) if x]
+                    if len(short_tokens) <= 2 and len(text.strip()) <= 14:
+                        answer = "Не расслышал. Повтори, пожалуйста."
+                        print(f"Jarvis: {answer}")
+                        status.update(state="speaking", message="Переспрашиваю…")
+                        already_spoken = False
+                        _speak_user(answer)
+                        status.update(last_answer=answer, force=True)
+                        status.update(state="idle", message="Готов")
+                        continue
                 status.update(state="thinking", message="Думаю…")
                 print("Думаю…")
                 history.append(ChatMessage(role="user", content=text))
                 try:
+                    t2 = time.monotonic()
                     if llamacpp_llm is not None:
                         if not llamacpp_llm.ping():
                             raise LlamaCppUnavailable("llama.cpp недоступен")
@@ -456,7 +612,67 @@ def run(config_path: str) -> None:
                         # лимиты зависят от режима "короче/нормально/подробнее"
                         max_sentences, max_chars, num_predict = _llm_limits(verbosity_mode, cfg.llm.fast_max_sentences, cfg.llm.fast_max_chars, cfg.llm.num_predict)
 
-                        if cfg.llm.fast_mode:
+                        if cfg.llm.stream_to_tts:
+                            # Потоково читаем токены и отправляем в TTS по предложениям.
+                            acc: list[str] = []
+                            buf = ""
+                            pending_sentence: str | None = None
+                            tts_started: float | None = None
+                            sentences = 0
+
+                            for delta in selected.chat_stream(
+                                llm_messages,
+                                num_predict=num_predict,
+                                temperature=cfg.llm.temperature,
+                                num_ctx=cfg.llm.ollama_num_ctx,
+                                num_thread=cfg.llm.ollama_num_thread,
+                                keep_alive=cfg.llm.ollama_keep_alive,
+                            ):
+                                acc.append(delta)
+                                buf += delta
+
+                                if len("".join(acc)) >= max_chars:
+                                    break
+
+                                while True:
+                                    cut = _find_sentence_cut(buf)
+                                    if cut is None:
+                                        break
+                                    chunk = buf[:cut].strip()
+                                    buf = buf[cut:].lstrip()
+                                    if not chunk:
+                                        continue
+                                    sentences += 1
+                                    if tts_started is None:
+                                        status.update(state="speaking", message="Отвечаю…")
+                                        tts_started = time.monotonic()
+
+                                    # Отправляем предыдущую фразу async, текущую держим как pending.
+                                    if pending_sentence is not None:
+                                        ls, ss, vol = _tts_style(pending_sentence, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
+                                        tts_worker.speak_async(pending_sentence, length_scale=ls, sentence_silence=ss, volume=vol)
+                                    pending_sentence = chunk
+
+                                    if sentences >= max_sentences:
+                                        buf = ""
+                                        break
+                                if sentences >= max_sentences:
+                                    break
+
+                            tail = buf.strip()
+                            answer = ("".join(acc)).strip()
+
+                            # Финальный блокирующий кусок: pending sentence + хвост.
+                            last_chunk = "".join([x for x in [pending_sentence, tail] if x]).strip()
+                            if last_chunk:
+                                if tts_started is None:
+                                    status.update(state="speaking", message="Отвечаю…")
+                                    tts_started = time.monotonic()
+                                _speak_user(last_chunk)
+                                already_spoken = True
+                                if tts_started is not None:
+                                    tts_ms = (time.monotonic() - tts_started) * 1000.0
+                        elif cfg.llm.fast_mode:
                             answer = selected.chat_fast(
                                 llm_messages,
                                 num_predict=num_predict,
@@ -483,13 +699,13 @@ def run(config_path: str) -> None:
                             last_llm_answer = answer
                     history.append(ChatMessage(role="assistant", content=answer))
                     history[:] = history[:1] + history[-int(cfg.llm.history_max_messages) :]
+                    llm_ms = (time.monotonic() - t2) * 1000.0
                 except (OllamaUnavailable, LlamaCppUnavailable) as e:
                     # В рантайме НЕ качаем модель и не делаем долгих повторов.
                     if not llm_warned:
                         llm_warned = True
                         s = "Нейросеть сейчас недоступна. Отвечаю командами."
-                        ls, ss, vol = _tts_style(s, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-                        tts.speak(s, length_scale=ls, sentence_silence=ss, volume=vol)
+                        _speak_user(s)
                     print(f"LLM недоступна: {e}")
                     ollama_fast = None
                     ollama_quality = None
@@ -502,12 +718,24 @@ def run(config_path: str) -> None:
                     answer = "Я пока умею только простые команды."
 
             print(f"Jarvis: {answer}")
-            status.update(state="speaking", message="Отвечаю…")
-            ls, ss, vol = _tts_style(answer, cfg.tts.length_scale, cfg.tts.sentence_silence, cfg.tts.volume)
-            tts.speak(answer, length_scale=ls, sentence_silence=ss, volume=vol)
+            if not already_spoken:
+                status.update(state="speaking", message="Отвечаю…")
+                t3 = time.monotonic()
+                _speak_user(answer)
+                tts_ms = (time.monotonic() - t3) * 1000.0
             if getattr(tts, "last_error", ""):
                 status.update(last_error=f"TTS: {tts.last_error}", force=True)
             status.update(last_answer=answer, force=True)
+
+            total_ms = (time.monotonic() - turn_start) * 1000.0
+            status.update(
+                latency_record_ms=rec_ms,
+                latency_stt_ms=stt_ms,
+                latency_llm_ms=llm_ms,
+                latency_tts_ms=tts_ms,
+                latency_total_ms=total_ms,
+                force=True,
+            )
             status.update(state="idle", message="Готов")
 
     except KeyboardInterrupt:
@@ -587,6 +815,9 @@ def _tts_style(text: str, base_length_scale: float, base_sentence_silence: float
     vol = float(base_volume)
 
     is_error = any(w in low for w in ("не смог", "ошибка", "недоступ", "таймаут"))
+    is_greeting = any(w in low for w in ("привет", "здравств", "доброе утро", "добрый день", "добрый вечер"))
+    is_thanks = any(w in low for w in ("пожалуйста", "рад помочь", "обращайся"))
+    is_positive = any(w in low for w in ("хорошо", "понял", "ок", "ладно", "сделал", "готово"))
     is_question = t.endswith("?")
     is_short = len(t) <= 18
 
@@ -594,6 +825,15 @@ def _tts_style(text: str, base_length_scale: float, base_sentence_silence: float
         ls *= 0.98
         ss *= 1.15
         vol *= 0.92
+    elif is_greeting or is_thanks:
+        # чуть живее
+        ls *= 0.94
+        ss *= 0.90
+        vol *= 1.06
+    elif is_positive and is_short:
+        ls *= 0.92
+        ss *= 0.88
+        vol *= 1.05
     elif is_question:
         ls *= 1.02
         ss *= 1.25
@@ -612,3 +852,38 @@ def _tts_style(text: str, base_length_scale: float, base_sentence_silence: float
     ss = max(0.05, min(0.35, ss))
     vol = max(0.25, min(1.2, vol))
     return ls, ss, vol
+
+
+def _find_sentence_cut(buf: str) -> int | None:
+    """Возвращает индекс (включая знак), где можно безопасно отрезать предложение."""
+    if not buf:
+        return None
+    # ищем конец предложения
+    for i, ch in enumerate(buf):
+        if ch in ".!?…":
+            # берём идущие подряд знаки пунктуации
+            j = i + 1
+            while j < len(buf) and buf[j] in ".!?…":
+                j += 1
+            return j
+    return None
+
+
+def _strip_address_prefix(text: str, phrases: tuple[str, ...]) -> tuple[bool, str]:
+    t = (text or "").strip()
+    if not t:
+        return False, ""
+    low = t.lower()
+    for p in phrases:
+        p = (p or "").strip().lower()
+        if not p:
+            continue
+        if low == p:
+            return True, ""
+        # "джарвис, ..." / "джарвис ..."
+        m = re.match(rf"^{re.escape(p)}([\s,.:;!?\-]+)(.+)$", low, flags=0)
+        if m:
+            # keep original casing of payload by slicing original string
+            payload = t[len(p) :].lstrip(" ,.:;!?-\t\n\r")
+            return True, payload.strip()
+    return False, t

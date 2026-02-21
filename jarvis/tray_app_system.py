@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from jarvis.paths import find_config_path, get_paths
+
 
 def _try_import_indicator():
     import gi  # type: ignore
@@ -61,53 +63,19 @@ def _get_status_path(root: Path) -> Path:
     env = os.environ.get("JARVIS_STATUS")
     if env:
         return Path(env).expanduser().resolve()
-    return root / "runtime" / "status.json"
+    # Prefer XDG state, fallback to portable root.
+    p = get_paths().status_path
+    return p if p.exists() else root / "runtime" / "status.json"
 
 
-def _edit_config_bool(config_path: Path, dotted_key: str, value: bool) -> None:
-    raw = config_path.read_text(encoding="utf-8")
-    key = dotted_key.split(".")[-1]
-    section = dotted_key.split(".")[0]
-    lines = raw.splitlines()
-    out: list[str] = []
-    in_section = False
-    changed = False
-    for line in lines:
-        if line.strip().endswith(":") and not line.startswith(" "):
-            in_section = line.strip() == f"{section}:"
-        if in_section and line.strip().startswith(f"{key}:"):
-            indent = line.split(key)[0]
-            out.append(f"{indent}{key}: {'true' if value else 'false'}")
-            changed = True
-        else:
-            out.append(line)
-    if not changed:
-        out.append(f"{section}:")
-        out.append(f"  {key}: {'true' if value else 'false'}")
-    config_path.write_text("\n".join(out) + "\n", encoding="utf-8")
-
-
-def _read_config_bool(config_path: Path, dotted_key: str, default: bool) -> bool:
-    try:
-        section = dotted_key.split(".")[0]
-        key = dotted_key.split(".")[-1]
-        in_section = False
-        for line in config_path.read_text(encoding="utf-8").splitlines():
-            if line.strip().endswith(":") and not line.startswith(" "):
-                in_section = line.strip() == f"{section}:"
-            if in_section and line.strip().startswith(f"{key}:"):
-                val = line.split(":", 1)[1].strip().lower()
-                return val in ("true", "yes", "1", "on")
-    except Exception:
-        pass
-    return default
+from jarvis.yaml_config import get_dotted_bool, set_dotted_bool
 
 
 def main() -> None:
     AppIndicator3, GLib, Gtk = _try_import_indicator()
 
     root = _get_project_root()
-    config_path = root / "config.yaml"
+    config_path = find_config_path(None)
     status_path = _get_status_path(root)
     icon_path = root / "assets" / "jarvis.svg"
 
@@ -148,11 +116,11 @@ def main() -> None:
     menu.append(Gtk.SeparatorMenuItem())
 
     toggle_wake = Gtk.CheckMenuItem(label="Wake word (активация)")
-    toggle_wake.set_active(_read_config_bool(config_path, "wake_word.enabled", True))
+    toggle_wake.set_active(get_dotted_bool(config_path, "wake_word.enabled", True))
     menu.append(toggle_wake)
 
     toggle_llm = Gtk.CheckMenuItem(label="LLM (Ollama)")
-    toggle_llm.set_active(_read_config_bool(config_path, "llm.enabled", True))
+    toggle_llm.set_active(get_dotted_bool(config_path, "llm.enabled", True))
     menu.append(toggle_llm)
 
     menu.append(Gtk.SeparatorMenuItem())
@@ -178,11 +146,11 @@ def main() -> None:
     indicator.set_menu(menu)
 
     def on_toggle_wake(_item):
-        _edit_config_bool(config_path, "wake_word.enabled", bool(toggle_wake.get_active()))
+        set_dotted_bool(config_path, "wake_word.enabled", bool(toggle_wake.get_active()))
         _systemctl_user("restart", "jarvis.service")
 
     def on_toggle_llm(_item):
-        _edit_config_bool(config_path, "llm.enabled", bool(toggle_llm.get_active()))
+        set_dotted_bool(config_path, "llm.enabled", bool(toggle_llm.get_active()))
         _systemctl_user("restart", "jarvis.service")
 
     def on_restart(_item):

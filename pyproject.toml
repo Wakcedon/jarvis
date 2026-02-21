@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-assistant"
+version = "0.1.0"
+description = "Local RU voice assistant for Linux"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+  "vosk>=0.3.45",
+  "sounddevice>=0.4.6",
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "requests>=2.31",
+  "faster-whisper>=1.2.1",
+  "piper-tts>=1.4.1",
+  "soundfile>=0.12",
+  "pathvalidate>=3.2.0",
+  "num2words>=0.5.13",
+  "platformdirs>=4.2.0",
+  "pydantic>=2.6.0",
+  "ruamel.yaml>=0.18.6",
+  "customtkinter>=5.2.2",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+jarvis-tray = "jarvis.tray_app_system:main"
+jarvis-monitor = "jarvis.monitor:main"
+jarvis-ui = "jarvis.ui_window:main"
+
+[tool.setuptools]
+packages = ["jarvis", "jarvis.skills"]
